@@ -1,0 +1,828 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tornado — vortex ingesting a field</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0a0c10; }
+  body { font: 12px/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace; color: #cfd8e3; }
+  #view { display: block; width: 100vw; height: 100vh; cursor: grab; }
+  #view.dragging { cursor: grabbing; }
+
+  .panel {
+    position: fixed; backdrop-filter: blur(8px);
+    background: rgba(12, 16, 22, 0.72);
+    border: 1px solid rgba(140, 170, 200, 0.16);
+    border-radius: 10px; padding: 10px 12px;
+  }
+  #ui { top: 12px; left: 12px; width: 236px; }
+  #ui h1 { margin: 0 0 2px; font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: #eaf0f7; }
+  #ui .sub { margin: 0 0 10px; color: #7e8ea1; font-size: 10.5px; }
+  .row { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px; margin-top: 8px; }
+  .row label { color: #9fb0c4; font-size: 10.5px; letter-spacing: .04em; }
+  .row .val { color: #ffd479; font-variant-numeric: tabular-nums; font-size: 10.5px; }
+  input[type=range] { grid-column: 1 / -1; width: 100%; height: 16px; margin: 0; -webkit-appearance: none; appearance: none; background: none; }
+  input[type=range]::-webkit-slider-runnable-track { height: 3px; background: #2b3644; border-radius: 2px; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; margin-top: -5px; border-radius: 50%; background: #ffd479; border: none; }
+  input[type=range]::-moz-range-track { height: 3px; background: #2b3644; border-radius: 2px; }
+  input[type=range]::-moz-range-thumb { width: 12px; height: 12px; border: none; border-radius: 50%; background: #ffd479; }
+
+  .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  button {
+    flex: 1 1 auto; padding: 5px 8px; font: inherit; font-size: 10.5px; letter-spacing: .05em;
+    color: #cfd8e3; background: #1b232e; border: 1px solid #2e3a49; border-radius: 6px; cursor: pointer;
+  }
+  button:hover { background: #24303e; color: #fff; }
+  button.on { background: #3a2f16; border-color: #6b5520; color: #ffd479; }
+
+  #hud { top: 12px; right: 12px; min-width: 190px; }
+  #hud .line { display: flex; justify-content: space-between; gap: 14px; }
+  #hud .line span:first-child { color: #7e8ea1; }
+  #hud .line span:last-child { color: #e6edf5; font-variant-numeric: tabular-nums; }
+  #hud .ef { margin-top: 6px; padding-top: 6px; border-top: 1px solid rgba(140,170,200,.14); font-size: 15px; letter-spacing: .1em; color: #ff8a5c; }
+  #hint { bottom: 12px; left: 12px; color: #6b7a8d; font-size: 10.5px; }
+  #hint b { color: #9fb0c4; font-weight: 500; }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div id="ui" class="panel">
+  <h1>Tornado</h1>
+  <p class="sub">Rankine vortex + radial inflow + updraft.<br>Debris is integrated, not animated.</p>
+
+  <div class="row"><label>Circulation &Gamma;</label><span class="val" id="vGamma"></span>
+    <input type="range" id="sGamma" min="1200" max="16000" step="100"></div>
+  <div class="row"><label>Core radius</label><span class="val" id="vCore"></span>
+    <input type="range" id="sCore" min="8" max="70" step="1"></div>
+  <div class="row"><label>Updraft</label><span class="val" id="vUp"></span>
+    <input type="range" id="sUp" min="0" max="110" step="1"></div>
+  <div class="row"><label>Radial inflow</label><span class="val" id="vIn"></span>
+    <input type="range" id="sIn" min="0" max="70" step="1"></div>
+  <div class="row"><label>Storm motion</label><span class="val" id="vStorm"></span>
+    <input type="range" id="sStorm" min="0" max="25" step="0.5"></div>
+
+  <div class="btns">
+    <button id="bPause">Pause</button>
+    <button id="bChase">Chase cam</button>
+    <button id="bSpin">Auto-orbit</button>
+    <button id="bRegrow">Regrow</button>
+    <button id="bReset">Reset field</button>
+  </div>
+</div>
+
+<div id="hud" class="panel">
+  <div class="line"><span>peak wind</span><span id="hWind">—</span></div>
+  <div class="line"><span>core radius</span><span id="hCore">—</span></div>
+  <div class="line"><span>debris aloft</span><span id="hAloft">—</span></div>
+  <div class="line"><span>field ingested</span><span id="hField">—</span></div>
+  <div class="line"><span>fps</span><span id="hFps">—</span></div>
+  <div class="ef" id="hEF">EF—</div>
+</div>
+
+<div id="hint"><b>drag</b> orbit &nbsp; <b>wheel</b> zoom &nbsp; <b>space</b> pause &nbsp; <b>C</b> chase &nbsp; <b>R</b> reset</div>
+
+<script>
+"use strict";
+/* ------------------------------------------------------------------ *
+ *  Tornado: a wind field with real structure, and passive matter
+ *  integrated inside it.
+ *
+ *  Wind model (cylindrical, axis vertical, moving with the storm):
+ *    tangential  Rankine vortex   v0 = G/(2*pi*rc) * (r/rc)  for r<rc
+ *                                 v0 = G/(2*pi*r)            for r>=rc
+ *    radial      frictional inflow layer, peaks at r=rc, decays with z
+ *    vertical    updraft concentrated in the core, ramping with height
+ *                plus a weak downdraft in the surrounding annulus (RFD)
+ *    surface     no-slip damping of horizontal wind near z=0
+ *
+ *  Debris model: quadratic aerodynamic drag with a per-object
+ *  ballistic coefficient k = 0.5*Cd*rho*A/m [1/m], gravity, and
+ *  inelastic ground contact with friction. Straw (large A/m) is ripped
+ *  up and spirals to the cloud base; planks tumble; stones barely
+ *  move. Nothing is scripted -- the funnel shape you see in the debris
+ *  is the solution of the flow.
+ * ------------------------------------------------------------------ */
+
+const TAU = Math.PI * 2;
+const G_ACC = 9.81;              // m/s^2
+const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
+const rand = (a, b) => a + Math.random() * (b - a);
+
+/* ------------------------------- canvas ------------------------------- */
+const cv = document.getElementById("view");
+const ctx = cv.getContext("2d", { alpha: false });
+let W = 0, H = 0, DPR = 1, focal = 1;
+
+/* The funnel is thousands of large, soft, low-alpha sprites: pure fill
+   rate. It is rendered into a half-resolution layer and upscaled --
+   invisible for something that soft, 4x cheaper. */
+const FOGS = 0.5;
+const fogC = document.createElement("canvas");
+const fogX = fogC.getContext("2d");
+let fw = 1, fh = 1;
+
+function resize() {
+  DPR = Math.min(devicePixelRatio || 1, 2);
+  W = cv.clientWidth; H = cv.clientHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  fw = Math.max(1, Math.round(W * FOGS)); fh = Math.max(1, Math.round(H * FOGS));
+  fogC.width = fw; fogC.height = fh;
+  focal = (0.5 * H) / Math.tan((58 * Math.PI / 180) / 2);
+  buildSky();
+}
+addEventListener("resize", resize);
+
+/* ------------------------------ parameters ---------------------------- */
+const P = {
+  gamma:  6800,   // circulation [m^2/s]
+  coreR:  28,     // reference core radius [m]
+  updraft: 55,    // peak vertical velocity [m/s]
+  inflow:  30,    // peak radial inflow [m/s]
+  storm:   8.5,   // translation speed [m/s]
+  topH:   340,    // cloud base height [m]
+  inflowH: 34,    // depth of the frictional inflow layer [m]
+};
+
+const FIELD = 150;                     // field half-width [m]
+const UPROOT = 13;                     // wind at stalk height that lodges the crop [m/s]
+let cx = -110, cz = -80;               // vortex axis position
+let heading = 0.62;                    // storm motion direction [rad]
+
+/* --------------------------- the wind field --------------------------- */
+// Core radius grows with height: tight, violent near the surface.
+function coreAt(y) {
+  const t = clamp(y / P.topH, 0, 1);
+  return P.coreR * (0.55 + 1.75 * Math.pow(t, 0.8));
+}
+
+const wind = { x: 0, y: 0, z: 0 };
+function windAt(x, y, z) {
+  const dx = x - cx, dz = z - cz;
+  const r = Math.hypot(dx, dz) || 1e-4;
+  const rc = coreAt(y);
+
+  // tangential (cyclonic, counter-clockwise seen from above)
+  const vt = r < rc ? (P.gamma / (TAU * rc)) * (r / rc) : P.gamma / (TAU * r);
+
+  // radial inflow: strongest in the surface friction layer, peaks near r=rc
+  const vr = -P.inflow * (2 * r * rc / (r * r + rc * rc)) * Math.exp(-y / P.inflowH);
+
+  // updraft in the core + weak compensating downdraft in the annulus
+  const s = r / rc;
+  let vy = P.updraft * Math.exp(-s * s * 0.7) * (0.3 + 0.7 * clamp(y / (0.3 * P.topH), 0, 1));
+  vy -= 0.12 * P.updraft * Math.exp(-Math.pow(s - 2.6, 2) * 0.9);
+
+  // no-slip: horizontal wind falls off towards the ground
+  const slip = 0.12 + 0.88 * (1 - Math.exp(-y / 0.8));
+  const ux = (-dz / r) * vt + (dx / r) * vr;
+  const uz = ( dx / r) * vt + (dz / r) * vr;
+
+  // storm translation is part of the ground-relative wind
+  wind.x = ux * slip + P.storm * Math.sin(heading) * slip * 0.55;
+  wind.z = uz * slip + P.storm * Math.cos(heading) * slip * 0.55;
+  wind.y = vy;
+  return wind;
+}
+const peakWind = () => P.gamma / (TAU * coreAt(0));   // max tangential at the surface
+
+/* -------------------------------- camera ------------------------------ */
+const cam = {
+  yaw: 0.6, pitch: 0.17, dist: 340,
+  tx: 0, ty: 95, tz: 0,             // look-at target
+  chase: false, spin: false,
+  px: 0, py: 0, pz: 0,
+  rx: 1, ry: 0, rz: 0,              // right
+  ux: 0, uy: 1, uz: 0,              // up
+  fx: 0, fy: 0, fz: 1,              // forward
+};
+
+function updateCamera(dt) {
+  if (cam.spin) cam.yaw += dt * 0.12;
+  const wantX = cam.chase ? cx : 0;
+  const wantZ = cam.chase ? cz : 0;
+  const wantY = cam.chase ? 110 : 95;
+  const lerp = 1 - Math.exp(-dt * 1.6);
+  cam.tx += (wantX - cam.tx) * lerp;
+  cam.tz += (wantZ - cam.tz) * lerp;
+  cam.ty += (wantY - cam.ty) * lerp;
+
+  const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+  cam.px = cam.tx + cam.dist * cp * Math.sin(cam.yaw);
+  cam.py = Math.max(3, cam.ty + cam.dist * sp);
+  cam.pz = cam.tz + cam.dist * cp * Math.cos(cam.yaw);
+
+  let fx = cam.tx - cam.px, fy = cam.ty - cam.py, fz = cam.tz - cam.pz;
+  let l = Math.hypot(fx, fy, fz) || 1; fx /= l; fy /= l; fz /= l;
+  cam.fx = fx; cam.fy = fy; cam.fz = fz;
+  // right = normalize(worldUp x forward)   (worldUp = +Y, so no roll)
+  let rx = fz, ry = 0, rz = -fx;
+  l = Math.hypot(rx, rz) || 1; rx /= l; rz /= l;
+  cam.rx = rx; cam.ry = ry; cam.rz = rz;
+  // up = forward x right
+  cam.ux = fy * rz - fz * ry;
+  cam.uy = fz * rx - fx * rz;
+  cam.uz = fx * ry - fy * rx;
+}
+
+// projection scratch
+let sx = 0, sy = 0, sz = 0;
+function project(x, y, z) {
+  const dx = x - cam.px, dy = y - cam.py, dz = z - cam.pz;
+  sz = dx * cam.fx + dy * cam.fy + dz * cam.fz;
+  if (sz < 0.6) return false;
+  const inv = focal / sz;
+  sx = W * 0.5 + (dx * cam.rx + dz * cam.rz) * inv;
+  sy = H * 0.5 - (dx * cam.ux + dy * cam.uy + dz * cam.uz) * inv;
+  return true;
+}
+// The horizon of the ground plane is a horizontal screen line (no roll).
+function horizonY() {
+  const hl = Math.hypot(cam.fx, cam.fz);
+  if (hl < 1e-3) return H * 2;
+  const hx = cam.fx / hl, hz = cam.fz / hl;
+  const num = hx * cam.ux + hz * cam.uz;
+  const den = hx * cam.fx + hz * cam.fz;
+  if (den < 1e-3) return H * 2;
+  return H * 0.5 - focal * (num / den);
+}
+
+/* --------------------------- the field of wheat ------------------------ */
+const GN = 112, GS = (FIELD * 2) / GN;
+const TN = GN * GN;
+const tx = new Float32Array(TN), tz = new Float32Array(TN);
+const tState = new Uint8Array(TN);      // 1 = standing, 0 = torn out
+const tH = new Float32Array(TN);        // stalk height [m]
+const tHue = new Uint8Array(TN);        // 0..2 colour variant
+let torn = 0;
+
+function buildField() {
+  torn = 0;
+  for (let j = 0, i = 0; j < GN; j++) {
+    for (let k = 0; k < GN; k++, i++) {
+      tx[i] = -FIELD + (k + 0.5) * GS + rand(-GS * 0.35, GS * 0.35);
+      tz[i] = -FIELD + (j + 0.5) * GS + rand(-GS * 0.35, GS * 0.35);
+      tState[i] = 1;
+      tH[i] = rand(1.15, 1.9);
+      tHue[i] = (Math.random() * 3) | 0;
+    }
+  }
+}
+
+/* ------------------------------- debris ------------------------------- */
+/* type: 0 straw  1 dust/soil  2 plank  3 stone  4 hay bale
+   k = 0.5*Cd*rho*A/m  [1/m] -- the whole aerodynamic character of an
+   object in one number. Straw: huge. Stone: nearly nil.            */
+const TYPE = [
+  { k: 2.60,  size: 0.55, col: "#e0bb63", drawn: "streak" },  // straw
+  { k: 7.00,  size: 0.30, col: "#9d8a72", drawn: "dust"   },  // soil
+  { k: 0.11,  size: 2.10, col: "#8a6a49", drawn: "plank"  },  // fence plank
+  { k: 0.02,  size: 0.45, col: "#6d6f74", drawn: "streak" },  // stone
+  { k: 0.055, size: 2.70, col: "#c9a75c", drawn: "bale"   },  // hay bale
+];
+
+const NP = 7200;
+const RESERVED = 80;              // low slots belong to the big props
+const px = new Float32Array(NP), py = new Float32Array(NP), pz = new Float32Array(NP);
+const vx = new Float32Array(NP), vy = new Float32Array(NP), vz = new Float32Array(NP);
+const pk = new Float32Array(NP), ps = new Float32Array(NP);
+const pt = new Uint8Array(NP), pAlive = new Uint8Array(NP), pRest = new Uint8Array(NP);
+const pRot = new Float32Array(NP), pSpin = new Float32Array(NP), pAge = new Float32Array(NP);
+let head = RESERVED, alive = 0, aloft = 0, bigCount = 0;
+
+function spawn(x, y, z, type, vX, vY, vZ) {
+  // ring buffer over the non-reserved slots; prefer matter already at rest
+  let i = -1;
+  const span = NP - RESERVED;
+  for (let tries = 0; tries < 32; tries++) {
+    const c = RESERVED + ((head - RESERVED + tries) % span);
+    if (!pAlive[c] || pRest[c]) { i = c; head = RESERVED + ((c - RESERVED + 1) % span); break; }
+  }
+  if (i < 0) { i = head; head = RESERVED + ((head - RESERVED + 1) % span); }
+  return init(i, x, y, z, type, vX, vY, vZ);
+}
+function spawnBig(x, y, z, type) {
+  const i = bigCount++ % RESERVED;
+  const p = init(i, x, y, z, type, 0, 0, 0);
+  pRest[p] = 1; pSpin[p] = 0;
+  return p;
+}
+function init(i, x, y, z, type, vX, vY, vZ) {
+  if (!pAlive[i]) alive++;
+  const T = TYPE[type];
+  px[i] = x; py[i] = y; pz[i] = z;
+  vx[i] = vX; vy[i] = vY; vz[i] = vZ;
+  pt[i] = type; pAlive[i] = 1; pRest[i] = 0; pAge[i] = 0;
+  pk[i] = T.k * rand(0.7, 1.35);
+  ps[i] = T.size * rand(0.7, 1.3);
+  pRot[i] = rand(0, TAU); pSpin[i] = rand(-6, 6);
+  return i;
+}
+
+/* big props seeded on the field: hay bales and a fence line */
+function seedObjects() {
+  bigCount = 0;
+  for (let i = 0; i < 16; i++)
+    spawnBig(rand(-FIELD * .9, FIELD * .9), 1.3, rand(-FIELD * .9, FIELD * .9), 4);
+  for (let i = 0; i < 48; i++) {
+    const p = spawnBig(-FIELD + (i / 47) * FIELD * 2, 1.0, -FIELD * 0.82, 2);
+    pRot[p] = Math.PI * 0.5;
+  }
+}
+
+function resetAll() {
+  pAlive.fill(0); pRest.fill(0); alive = 0; head = RESERVED;
+  cx = -FIELD * 0.75; cz = -FIELD * 0.55; heading = 0.62;
+  buildField(); seedObjects();
+}
+
+/* ------------------------- funnel condensation ------------------------ */
+/* Massless tracers: v = u exactly, so what you see is the flow itself. */
+const NT = 2300;
+const trx = new Float32Array(NT), tryy = new Float32Array(NT), trz = new Float32Array(NT);
+const trl = new Float32Array(NT), trv = new Float32Array(NT);
+function seedTracer(i) {
+  const y = Math.pow(Math.random(), 0.8) * P.topH;
+  const rc = coreAt(y);
+  const a = rand(0, TAU), r = rc * rand(0.35, 1.5);
+  trx[i] = cx + Math.cos(a) * r; tryy[i] = y; trz[i] = cz + Math.sin(a) * r;
+  trl[i] = rand(3, 13);            // puff radius [m]
+  trv[i] = rand(0.55, 1.25);       // opacity variation -> striations
+}
+for (let i = 0; i < NT; i++) seedTracer(i);
+
+/* --------------------------------- physics ---------------------------- */
+function step(dt) {
+  // storm translation, with a slowly wandering track so it sweeps the field
+  heading += Math.sin(time * 0.21) * 0.12 * dt;
+  cx += P.storm * Math.sin(heading) * dt;
+  cz += P.storm * Math.cos(heading) * dt;
+  const lim = FIELD * 1.35;
+  if (Math.abs(cx) > lim || Math.abs(cz) > lim) {   // re-enter from another edge
+    cx = -Math.sign(cx || 1) * FIELD * 0.95;
+    cz = rand(-FIELD * 0.9, FIELD * 0.9);
+    heading = Math.atan2(-cx, -cz) + rand(-0.4, 0.4);
+  }
+
+  /* --- uproot the crop wherever the surface wind exceeds its hold ---
+     Only the cells that could possibly be over threshold are visited:
+     outside r = 0.9*G/(2*pi*Uproot) the tangential wind is too weak.  */
+  const rMax = Math.max(0.9 * P.gamma / (TAU * UPROOT), coreAt(0) * 3) + GS;
+  const k0 = clamp(Math.floor((cx - rMax + FIELD) / GS) - 1, 0, GN - 1);
+  const k1 = clamp(Math.ceil ((cx + rMax + FIELD) / GS) + 1, 0, GN - 1);
+  const j0 = clamp(Math.floor((cz - rMax + FIELD) / GS) - 1, 0, GN - 1);
+  const j1 = clamp(Math.ceil ((cz + rMax + FIELD) / GS) + 1, 0, GN - 1);
+  for (let j = j0; j <= j1; j++) {
+    for (let k = k0, i = j * GN + k0; k <= k1; k++, i++) {
+      if (!tState[i]) continue;
+      const u = windAt(tx[i], tH[i] * 0.7, tz[i]);
+      const sp = Math.hypot(u.x, u.z);
+      if (sp <= UPROOT) continue;
+      tState[i] = 0; torn++;
+      const n = 1 + (Math.random() < 0.5 ? 1 : 0);
+      for (let q = 0; q < n; q++)
+        spawn(tx[i] + rand(-.4, .4), tH[i] * rand(.3, 1), tz[i] + rand(-.4, .4), 0,
+              u.x * 0.55 + rand(-2, 2), rand(0.5, 4), u.z * 0.55 + rand(-2, 2));
+      if (Math.random() < 0.35)
+        spawn(tx[i], 0.25, tz[i], 1, u.x * 0.6, rand(0, 2), u.z * 0.6);
+    }
+  }
+
+  /* --- soil lofted from the surface inside the debris cloud --- */
+  const rc0 = coreAt(0);
+  for (let i = 0; i < 9; i++) {
+    const a = rand(0, TAU), r = rc0 * rand(0.4, 3.4);
+    spawn(cx + Math.cos(a) * r, rand(0.05, 1.2), cz + Math.sin(a) * r, 1, 0, rand(0, 3), 0);
+  }
+
+  /* --- integrate every piece of matter --- */
+  aloft = 0;
+  for (let i = 0; i < NP; i++) {
+    if (!pAlive[i]) continue;
+    pAge[i] += dt;
+
+    if (pRest[i]) {
+      // resting: only wake up if the wind can actually move it
+      if ((i & 7) === (frameCount & 7)) {
+        const u = windAt(px[i], Math.max(0.4, ps[i] * 0.5), pz[i]);
+        const sp = Math.hypot(u.x, u.y, u.z);
+        // drag force per mass vs. weight -> threshold for motion
+        if (pk[i] * sp * sp > G_ACC * 0.55) pRest[i] = 0;
+      }
+      continue;
+    }
+
+    const u = windAt(px[i], py[i], pz[i]);
+    const rx = u.x - vx[i], ry = u.y - vy[i], rz = u.z - vz[i];
+    const rel = Math.hypot(rx, ry, rz);
+    // quadratic drag, integrated exponentially -> unconditionally stable
+    const a = 1 - Math.exp(-pk[i] * rel * dt);
+    vx[i] += rx * a; vy[i] += ry * a; vz[i] += rz * a;
+    vy[i] -= G_ACC * dt;
+
+    px[i] += vx[i] * dt; py[i] += vy[i] * dt; pz[i] += vz[i] * dt;
+    pRot[i] += pSpin[i] * dt;
+    pSpin[i] += (Math.hypot(rx, rz) * 0.02 - pSpin[i] * 0.3) * dt;
+
+    if (py[i] > 1.0) aloft++;
+
+    if (py[i] <= 0) {                       // ground contact
+      py[i] = 0;
+      if (vy[i] < 0) vy[i] *= -0.22;
+      const mu = pt[i] === 0 ? 0.55 : pt[i] === 1 ? 0.4 : 0.82;
+      vx[i] *= 1 - mu; vz[i] *= 1 - mu;
+      const sp = Math.hypot(vx[i], vy[i], vz[i]);
+      if (sp < 0.7) { pRest[i] = 1; vx[i] = vy[i] = vz[i] = 0; pSpin[i] = 0; }
+    }
+    // retire matter that left the scene or reached the cloud base
+    if (py[i] > P.topH * 1.02 || Math.abs(px[i]) > FIELD * 3 || Math.abs(pz[i]) > FIELD * 3 ||
+        (pt[i] === 1 && pAge[i] > 26)) { pAlive[i] = 0; alive--; }
+  }
+
+  /* --- funnel tracers ride the flow exactly --- */
+  for (let i = 0; i < NT; i++) {
+    const u = windAt(trx[i], tryy[i], trz[i]);
+    trx[i] += u.x * dt; tryy[i] += u.y * dt; trz[i] += u.z * dt;
+    const r = Math.hypot(trx[i] - cx, trz[i] - cz);
+    if (tryy[i] > P.topH || tryy[i] < 0 || r > coreAt(tryy[i]) * 2.8) seedTracer(i);
+  }
+
+  if (regrow) {
+    for (let n = 0; n < 26; n++) {
+      const i = (Math.random() * TN) | 0;
+      if (!tState[i] && Math.hypot(tx[i] - cx, tz[i] - cz) > 130) { tState[i] = 1; torn--; }
+    }
+  }
+}
+
+/* -------------------------------- sprites ----------------------------- */
+function makePuff(rgb) {
+  const s = 64, c = document.createElement("canvas");
+  c.width = c.height = s;
+  const g = c.getContext("2d");
+  const grd = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+  grd.addColorStop(0, `rgba(${rgb},0.95)`);
+  grd.addColorStop(0.45, `rgba(${rgb},0.28)`);
+  grd.addColorStop(1, `rgba(${rgb},0)`);
+  g.fillStyle = grd; g.fillRect(0, 0, s, s);
+  return c;
+}
+const puffGrey = makePuff("134,140,147");   // condensation
+const puffDust = makePuff("158,138,106");   // lofted soil
+const puffDark = makePuff("26,29,34");      // cloud base
+
+/* The backdrop -- sky gradient, overcast deck, bare ground, horizon haze
+   -- is several full-screen alpha fills. It only depends on the horizon
+   height, so it is baked once and re-baked when the camera pitches. */
+const bdC = document.createElement("canvas");
+const bdX = bdC.getContext("2d");
+let bdY = -1e9;
+const cloudSeed = [];
+for (let i = 0; i < 90; i++)
+  cloudSeed.push({ x: Math.random(), y: Math.random(), r: rand(0.05, 0.22), a: rand(0.05, 0.2) });
+
+function buildSky() {
+  bdC.width = Math.round(W * DPR); bdC.height = Math.round(H * DPR); bdY = -1e9;
+  cropC.width = bdC.width; cropC.height = bdC.height; cropCamKey = "";
+}
+
+function bakeBackdrop(yH) {
+  bdY = yH;
+  const g = bdX;
+  g.setTransform(DPR, 0, 0, DPR, 0, 0);
+  g.clearRect(0, 0, W, H);
+  const hz = clamp(yH, H * 0.06, H * 0.98);
+
+  const sky = g.createLinearGradient(0, 0, 0, hz);
+  sky.addColorStop(0.00, "#10141b");
+  sky.addColorStop(0.34, "#272d35");
+  sky.addColorStop(0.68, "#55584e");
+  sky.addColorStop(1.00, "#8d8462");
+  g.fillStyle = sky; g.fillRect(0, 0, W, hz + 1);
+
+  for (const c of cloudSeed) {                       // overcast deck
+    g.fillStyle = `rgba(13,16,21,${c.a})`;
+    g.beginPath(); g.ellipse(c.x * W, c.y * hz * 0.92, c.r * W, c.r * W * 0.3, 0, 0, TAU); g.fill();
+  }
+
+  if (hz < H) {                                      // bare soil under the crop
+    g.fillStyle = "#4a4630"; g.fillRect(0, hz, W, H - hz);
+    const haze = g.createLinearGradient(0, hz, 0, Math.min(H, hz + H * 0.34));
+    haze.addColorStop(0, "rgba(126,120,94,0.92)");
+    haze.addColorStop(1, "rgba(126,120,94,0)");
+    g.fillStyle = haze; g.fillRect(0, hz, W, H - hz);
+  }
+}
+
+/* -------------------------------- drawing ----------------------------- */
+function draw() {
+  const yH = horizonY();
+  if (Math.abs(yH - bdY) > 4) bakeBackdrop(yH);
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.drawImage(bdC, 0, 0);                          // 1:1 copy, no filtering
+  ctx.restore();
+
+  drawCrop();
+  drawCeiling();
+  drawWallCloud();
+  drawFunnel();
+  drawTracers();
+  drawDebris();
+}
+
+const CROP_COL = ["#c9ab52", "#dcc072", "#ac8f3c"];
+/* Twelve thousand stalks are too many to stroke every frame. Only the
+   ones close to the vortex -- the ones actually whipping around and
+   being torn out -- are live. The rest are baked into a cached layer
+   that is refreshed a few times a second, or whenever the camera moves. */
+const LIVE_R = 85, LIVE_R2 = LIVE_R * LIVE_R;
+const cropC = document.createElement("canvas");
+const cropX = cropC.getContext("2d");
+let cropBakeT = -1e9, cropCamKey = "", cropVx = 1e9, cropVz = 1e9;
+
+function emitCrop(g, near, stride) {
+  const paths = [new Path2D(), new Path2D(), new Path2D()];
+  const scar = new Path2D();
+  const ax = Math.sin(heading), az = Math.cos(heading);
+  const swayA = 0.10 + 0.05 * Math.sin(time * 1.7);
+
+  for (let i = 0; i < TN; i += 1) {
+    const x = tx[i], z = tz[i];
+    const dx = x - cx, dz = z - cz;
+    const isNear = dx * dx + dz * dz < LIVE_R2;
+    if (isNear !== near) continue;
+    if (!near && stride > 1 && (i % stride)) continue;
+    if (!project(x, 0, z)) continue;
+    const bx = sx, by = sy;
+    if (bx < -30 || bx > W + 30 || by < -30 || by > H + 30) continue;
+    if (!tState[i]) {                              // stripped ground
+      scar.moveTo(bx - 1.7, by); scar.lineTo(bx + 1.7, by);
+      continue;
+    }
+    const h = tH[i];
+    let dirx, dirz, bend;
+    if (isNear || i % 3 === 0) {                   // real wind where it matters
+      const u = windAt(x, h * 0.9, z);
+      const sp = Math.hypot(u.x, u.z) || 1e-3;
+      dirx = u.x / sp; dirz = u.z / sp;
+      bend = clamp(sp / 20, 0, 0.9);               // stalks lay over into the wind
+    } else {
+      dirx = ax; dirz = az; bend = swayA;          // ambient sway
+    }
+    if (!project(x + dirx * h * bend, h * (1 - bend * 0.5), z + dirz * h * bend)) continue;
+    const p = paths[tHue[i]];
+    p.moveTo(bx, by); p.lineTo(sx, sy);
+  }
+  g.lineCap = "butt";
+  g.lineWidth = 3.2; g.strokeStyle = "rgba(63,48,31,0.9)"; g.stroke(scar);
+  g.lineWidth = 1.5;
+  for (let h = 0; h < 3; h++) { g.strokeStyle = CROP_COL[h]; g.stroke(paths[h]); }
+}
+
+function camKey() {
+  return (cam.yaw.toFixed(3) + "|" + cam.pitch.toFixed(3) + "|" + cam.dist.toFixed(1) + "|" +
+          cam.tx.toFixed(1) + "|" + cam.ty.toFixed(1) + "|" + cam.tz.toFixed(1));
+}
+
+function drawCrop() {
+  const key = camKey();
+  const moving = key !== cropCamKey;
+  const stale = time - cropBakeT > 0.3 ||
+                Math.abs(cx - cropVx) > 10 || Math.abs(cz - cropVz) > 10;
+  if (moving || stale) {
+    cropX.setTransform(DPR, 0, 0, DPR, 0, 0);
+    cropX.clearRect(0, 0, W, H);
+    emitCrop(cropX, false, moving ? 2 : 1);        // half density while orbiting
+    cropCamKey = key; cropBakeT = time; cropVx = cx; cropVz = cz;
+  }
+  ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.drawImage(cropC, 0, 0); ctx.restore();
+  emitCrop(ctx, true, 1);                          // the violent part, every frame
+}
+
+/* the storm's cloud base, in world space, so the funnel actually hangs
+   from a ceiling instead of ending in empty sky */
+const ceiling = [];
+for (let i = 0; i < 260; i++) {
+  const a = rand(0, TAU), r = 70 + Math.pow(Math.random(), 0.55) * 950;
+  ceiling.push({ dx: Math.cos(a) * r, dz: Math.sin(a) * r, yk: rand(0.98, 1.22), s: rand(60, 190) });
+}
+function drawCeiling() {
+  for (const c of ceiling) {
+    if (!project(cx + c.dx, P.topH * c.yk, cz + c.dz)) continue;
+    const s = (focal * c.s) / sz;
+    if (s < 1 || sx < -s - W || sx > W + s + W) continue;
+    ctx.globalAlpha = 0.5;
+    ctx.drawImage(puffDark, sx - s, sy - s * 0.6, s * 2, s * 1.2);
+  }
+  ctx.globalAlpha = 1;
+}
+
+/* rotating wall cloud at the cloud base -- fixed blobs, so it turns
+   with the vortex instead of flickering */
+const wallBlobs = [];
+for (let i = 0; i < 30; i++)
+  wallBlobs.push({ a: (i / 30) * TAU, rk: rand(2.1, 3.5), yk: rand(0.93, 1.10), s: rand(1.2, 1.9) });
+
+function drawWallCloud() {
+  for (const b of wallBlobs) {
+    const a = b.a + time * 0.22;
+    const r = coreAt(P.topH) * b.rk;
+    if (!project(cx + Math.cos(a) * r, P.topH * b.yk, cz + Math.sin(a) * r)) continue;
+    const s = (focal * coreAt(P.topH) * b.s) / sz;
+    ctx.fillStyle = "rgba(20,23,28,0.45)";
+    ctx.beginPath(); ctx.ellipse(sx, sy, s, s * 0.48, 0, 0, TAU); ctx.fill();
+  }
+}
+
+/* translucent condensation shell, sampled from the real rc(y) profile */
+function drawFunnel() {
+  const N = 26, L = [], R = [];
+  for (let i = 0; i <= N; i++) {
+    const y = (i / N) * P.topH;
+    if (!project(cx, y, cz)) continue;
+    const half = (focal * coreAt(y) * 1.35) / sz;
+    L.push([sx - half, sy]); R.push([sx + half, sy]);
+  }
+  if (L.length < 3) return;
+  ctx.beginPath();
+  ctx.moveTo(L[0][0], L[0][1]);
+  for (let i = 1; i < L.length; i++) ctx.lineTo(L[i][0], L[i][1]);
+  for (let i = R.length - 1; i >= 0; i--) ctx.lineTo(R[i][0], R[i][1]);
+  ctx.closePath();
+  const g = ctx.createLinearGradient(0, L[L.length - 1][1], 0, L[0][1]);
+  g.addColorStop(0, "rgba(38,42,48,0.62)");
+  g.addColorStop(0.55, "rgba(70,72,70,0.34)");
+  g.addColorStop(1, "rgba(120,110,86,0.30)");
+  ctx.fillStyle = g; ctx.fill();
+}
+
+function drawTracers() {
+  fogX.clearRect(0, 0, fw, fh);
+  for (let i = 0; i < NT; i++) {
+    if (!project(trx[i], tryy[i], trz[i])) continue;
+    if (sx < -80 || sx > W + 80 || sy < -80 || sy > H + 80) continue;
+    const s = Math.min((focal * trl[i]) / sz * FOGS, 110);   // cap the fill rate
+    if (s < 0.4) continue;
+    // dusty near the surface, condensation grey higher up
+    const low = tryy[i] < 110;
+    fogX.globalAlpha = clamp(0.13 * trv[i], 0.02, 0.2);
+    fogX.drawImage(low ? puffDust : puffGrey, sx * FOGS - s, sy * FOGS - s, s * 2, s * 2);
+  }
+  ctx.drawImage(fogC, 0, 0, W, H);
+}
+
+/* Thousands of individual strokes are far too expensive, so debris is
+   collected into three depth tiers and each tier is drawn as one batched
+   path per material. Coarse painter ordering, ~12 draw calls. */
+const TIERS = 3;
+const TIER_A = [0.42, 0.72, 1.0];        // haze by distance
+const TIER_LW = [0.8, 1.2, 1.8];
+const bigList = [];
+
+function drawDebris() {
+  const maxD = cam.dist * 2.8;
+  const dustP = [], strawP = [], stoneP = [];
+  for (let t = 0; t < TIERS; t++) { dustP.push(new Path2D()); strawP.push(new Path2D()); stoneP.push(new Path2D()); }
+  bigList.length = 0;
+
+  for (let i = 0; i < NP; i++) {
+    if (!pAlive[i]) continue;
+    if (!project(px[i], py[i], pz[i])) continue;
+    const X = sx, Y = sy, Z = sz;
+    if (X < -60 || X > W + 60 || Y < -60 || Y > H + 60) continue;
+    const t = Z < maxD * 0.3 ? 2 : Z < maxD * 0.62 ? 1 : 0;
+    const s = (focal * ps[i]) / Z;
+    const type = pt[i];
+
+    if (type === 1) {                        // soil: small squares
+      const r = Math.max(0.7, s * 1.7);
+      dustP[t].rect(X - r, Y - r, r * 2, r * 2);
+    } else if (type === 0 || type === 3) {   // straw / stone: motion streaks
+      // the streak *is* the trajectory: position minus 35 ms of velocity
+      const p = type === 0 ? strawP[t] : stoneP[t];
+      p.moveTo(X, Y);
+      if (project(px[i] - vx[i] * 0.035, py[i] - vy[i] * 0.035, pz[i] - vz[i] * 0.035))
+        p.lineTo(sx, sy);
+      else p.lineTo(X + 0.7, Y);
+    } else {                                 // planks and bales: few, drawn solo
+      bigList.push(i, X, Y, Z, t);
+    }
+  }
+
+  for (let t = 0; t < TIERS; t++) {
+    ctx.globalAlpha = TIER_A[t] * 0.55;
+    ctx.fillStyle = TYPE[1].col; ctx.fill(dustP[t]);
+    ctx.globalAlpha = TIER_A[t];
+    ctx.lineWidth = TIER_LW[t];
+    ctx.strokeStyle = TYPE[0].col; ctx.stroke(strawP[t]);
+    ctx.strokeStyle = TYPE[3].col; ctx.stroke(stoneP[t]);
+    for (let q = 0; q < bigList.length; q += 5) {
+      if (bigList[q + 4] !== t) continue;
+      const i = bigList[q], X = bigList[q + 1], Y = bigList[q + 2], Z = bigList[q + 3];
+      const s = (focal * ps[i]) / Z;
+      ctx.save(); ctx.translate(X, Y);
+      if (pt[i] === 2) {                     // fence plank
+        const L = Math.max(1.5, s * 2.4), th = Math.max(0.8, s * 0.4);
+        ctx.rotate(pRot[i]);
+        ctx.fillStyle = TYPE[2].col; ctx.fillRect(-L, -th, L * 2, th * 2);
+      } else {                               // hay bale
+        const r = Math.max(2, s * 1.5);
+        ctx.rotate(pRot[i] * 0.4);
+        ctx.fillStyle = TYPE[4].col;
+        ctx.beginPath(); ctx.ellipse(0, 0, r, r * 0.92, 0, 0, TAU); ctx.fill();
+        ctx.strokeStyle = "rgba(88,64,30,0.85)"; ctx.lineWidth = Math.max(0.6, r * 0.13);
+        ctx.beginPath(); ctx.ellipse(0, 0, r * 0.55, r * 0.5, 0, 0, TAU); ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+/* ---------------------------------- HUD ------------------------------- */
+const EF = [[38, "EF0"], [49, "EF1"], [60, "EF2"], [74, "EF3"], [89, "EF4"], [1e9, "EF5"]];
+const el = id => document.getElementById(id);
+let fps = 60;
+function hud() {
+  const pw = peakWind();
+  el("hWind").textContent = pw.toFixed(0) + " m/s · " + (pw * 3.6).toFixed(0) + " km/h";
+  el("hCore").textContent = coreAt(0).toFixed(1) + " m";
+  el("hAloft").textContent = aloft.toLocaleString();
+  el("hField").textContent = (100 * torn / TN).toFixed(1) + " %";
+  el("hFps").textContent = fps.toFixed(0);
+  let name = "EF0";
+  for (const [lim, n] of EF) if (pw < lim) { name = n; break; }
+  el("hEF").textContent = name + (pw < 29 ? "  (sub-tornadic)" : "");
+}
+
+/* -------------------------------- controls ---------------------------- */
+let paused = false, regrow = false, time = 0, frameCount = 0;
+
+function bindSlider(sliderId, valueId, key, fmt) {
+  const s = el(sliderId), v = el(valueId);
+  s.value = String(P[key]);
+  const show = () => { v.textContent = fmt(P[key]); };
+  s.addEventListener("input", () => { P[key] = parseFloat(s.value); show(); });
+  show();
+}
+bindSlider("sGamma", "vGamma", "gamma",   v => v.toFixed(0) + " m\u00B2/s");
+bindSlider("sCore",  "vCore",  "coreR",   v => v.toFixed(1) + " m");
+bindSlider("sUp",    "vUp",    "updraft", v => v.toFixed(0) + " m/s");
+bindSlider("sIn",    "vIn",    "inflow",  v => v.toFixed(0) + " m/s");
+bindSlider("sStorm", "vStorm", "storm",   v => v.toFixed(1) + " m/s");
+
+el("bPause").onclick = e => { paused = !paused; e.target.classList.toggle("on", paused); e.target.textContent = paused ? "Resume" : "Pause"; };
+el("bChase").onclick = e => { cam.chase = !cam.chase; e.target.classList.toggle("on", cam.chase); };
+el("bSpin").onclick  = e => { cam.spin = !cam.spin; e.target.classList.toggle("on", cam.spin); };
+el("bRegrow").onclick = e => { regrow = !regrow; e.target.classList.toggle("on", regrow); };
+el("bReset").onclick = () => resetAll();
+
+addEventListener("keydown", e => {
+  if (e.code === "Space") { e.preventDefault(); el("bPause").click(); }
+  else if (e.key.toLowerCase() === "c") el("bChase").click();
+  else if (e.key.toLowerCase() === "r") resetAll();
+});
+
+let dragging = false, lastX = 0, lastY = 0;
+cv.addEventListener("pointerdown", e => { dragging = true; lastX = e.clientX; lastY = e.clientY; cv.classList.add("dragging"); cv.setPointerCapture(e.pointerId); });
+cv.addEventListener("pointerup", e => { dragging = false; cv.classList.remove("dragging"); });
+cv.addEventListener("pointermove", e => {
+  if (!dragging) return;
+  cam.yaw -= (e.clientX - lastX) * 0.005;
+  cam.pitch = clamp(cam.pitch + (e.clientY - lastY) * 0.004, 0.02, 1.35);
+  lastX = e.clientX; lastY = e.clientY;
+});
+cv.addEventListener("wheel", e => {
+  e.preventDefault();
+  cam.dist = clamp(cam.dist * Math.exp(e.deltaY * 0.0011), 25, 900);
+}, { passive: false });
+
+/* ---------------------------------- loop ------------------------------ */
+resize();
+resetAll();
+
+let prev = performance.now();
+function frame(now) {
+  const raw = (now - prev) / 1000; prev = now;
+  fps += (1 / Math.max(raw, 1e-3) - fps) * 0.08;
+  const dt = Math.min(raw, 1 / 30);
+  if (!paused) {
+    // two substeps keep fast, light debris well-resolved near the core
+    step(dt * 0.5); step(dt * 0.5);
+    time += dt;
+  }
+  frameCount++;
+  updateCamera(dt);
+  draw();
+  if ((frameCount & 7) === 0) hud();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
