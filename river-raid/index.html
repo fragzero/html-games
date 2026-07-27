@@ -1,1 +1,44 @@
-
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>p5.js Game</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.4.0/p5.js"></script> 
+  <script src="game.js"></script>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="game-info">
+    <h1>River Raid in p5.js</h1>
+    <div class="instructions">
+      <p><strong>How to Play:</strong></p>
+      <ul>
+        <li>Use LEFT and RIGHT arrow keys to move the plane</li>
+        <li>Press SPACEBAR to shoot</li>
+        <li>Avoid colliding with the river banks</li>
+        <li>Destroy enemies to score points</li>
+        <li>Collect fuel to keep flying</li>
+      </ul>
+    </div>
+  </div>
+  <div class="legend">
+    <h2>Game Elements</h2>
+    <div class="legend-item">
+        <div class="legend-icon" style="background-color: #ff0000;"></div>
+        <div class="legend-text">Helicopter - Your player</div>
+    </div>
+    <div class="legend-item">
+        <div class="legend-icon" style="background-color: #00ff00;"></div>
+        <div class="legend-text">Fuel Tank - Collect to refuel</div>
+    </div>
+    <div class="legend-item">
+        <div class="legend-icon" style="background-color: #0000ff;"></div>
+        <div class="legend-text">Enemy - Avoid or shoot them</div>
+    </div>
+    <div class="legend-item">
+        <div class="legend-icon" style="background-color: #808080;"></div>
+        <div class="legend-text">Bridge - Shoot to score points</div>
+    </div>
+  </div>
+</body>
+</html>
