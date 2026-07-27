@@ -1,1 +1,65 @@
+body {
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+    background-color: rgba(0,255,0);
+    font-family: Arial, sans-serif;
+    color: white;
+    text-align: center;
+    position: relative;  /* Add this to make absolute positioning work */
+}
 
+canvas {
+    display: block;
+}
+
+.game-info {
+    margin-bottom: 20px;
+    background-color: rgba(0, 0, 0, 0.5);
+    padding: 20px;
+    border-radius: 10px;
+    max-width: 600px;
+    text-align: left;
+}
+
+h1 {
+    margin-bottom: 20px;
+    text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+}
+
+.legend {
+    position: fixed;  /* Change from absolute to fixed */
+    bottom: 20px;
+    left: 20px;
+    background-color: rgba(0, 0, 0, 0.7);
+    padding: 15px;
+    border-radius: 10px;
+    margin-top: 20px;
+    text-align: left;
+    max-width: 600px;
+    z-index: 1000;
+}
+
+.legend-item {
+    margin: 10px 0;
+    display: flex;
+    align-items: center;
+}
+
+.legend-icon {
+    width: 30px;
+    height: 30px;
+    margin-right: 15px;
+    background-color: white;
+    display: inline-block;
+}
+
+.legend-text {
+    display: inline-block;
+    vertical-align: middle;
+}
